@@ -4,18 +4,19 @@ const int      NUM_PARAMS = 6;
 volatile float param[NUM_PARAMS + 1];
 boolean        isLess = false;
 
-// Programming channels assignment.
-const int GAIN_PARAM =       1;
+// Programming params assignment.
+const int GAIN_SUP_PARAM =   1;
 const int GAIN_MAX_PARAM =   2;
-const int ZUMM_PARAM =       3;
+const int LOW_BATT_PARAM =   3;
 const int PROP_PARAM =       4;
-const int THR_PARAM =        5;
+const int THR_SUP_PARAM =    5;
 const int THR_MIN_PARAM =    6;
 
-const int G1 =     7;
-const int G2 =     8;
-const int T1 =     9;
-const int T2 =     10;
+// Params with GAIN and THR calibration data.
+const int GMIN =     7;
+const int GMAX =     8;
+const int TMIN =     9;
+const int TMAX =     10;
 
 // MOD signal states.
 const int mode2D = 0;
@@ -24,73 +25,65 @@ const int modeNone = 2;
 
 // Working modes.
 boolean directOn = false;
-boolean progOn   = false;
+boolean paramSetOn   = false;
 boolean calibOn  = false;
 boolean enterNormal = false;
 boolean startOn = true;
+unsigned long tIdleStart = 0;
 
-int curChannel = 0;
-float curChannelVal = 0.0;
-int oldCurChannel = 0;
-unsigned long endProgTime = 0;
-unsigned long channelChangeTime = 0;
+// Current param related variables.
+int curParam = 0;
+float curParamVal = 0.0;
+int oldCurParam = 0;
+unsigned long curParamChangeTime = 0;
 
-// TROTTLE
+// TROTTLE variables
 int THR_OUT_PIN = 4;
 int THR_IN_PIN = 3;
-
-int t1 = 0;
-int t2 = 0;
-int t1A = 1500;
-int t2A = 1500;
-int tIn = t1;
-int tOut = t1;
+int tMax = 0;
+int tMin = 0;
+int tIn = tMax;
+int tOut = tMax;
 volatile unsigned long tStart = 0;
-float tMin = 0.0;
 volatile float ttIn  = 0.0;
 float tOutA = 0.0;
 
-
-// GAIN
+// GAIN variables
 int GAIN_OUT_PIN = 5;
 int GAIN_IN_PIN = 2;
-
-int g1 = 0;
-int g2 = 0;
-int g1A = 1500;
-int g2A = 1500;
-int gIn = g1;
-volatile int gOut = g1;
-volatile unsigned long sStart = 0;
+int gMin = 0;
+int gMax = 0;
+int gIn = gMin;
+int gOld = 0;
+volatile int gOut = gMin;
+volatile unsigned long gStart = 0;
 float gAOut  = 1.0;
 
-// SWITCH
+// SWITCH variables
 int MOD_IN_PIN = 0;
-
 volatile int sw = 0;
 int oldSw = 0;
 volatile int modIn = 0;
-volatile unsigned long modStart = 0;
+volatile unsigned long mStart = 0;
 int sw1Level = 1300;
 int sw2Level = 1600;
 
-// Zummer
-int BATT_IN = 1;  // Analog pin
+// Zummer variables
 int ZUMM_OUT_PIN = 14;
-
 float zIn = 1.0;
 boolean lowBatt = false;
 
-// PROP
-int PROP_IN_PIN = 7;  // Never used in programm.
+// Battery voltage
+int BATT_IN = 1;  // Analog pin
 
+// PROP sensor
+int PROP_IN_PIN = 7;  // Never used in programm.
 volatile int counter = 0;
 volatile int rps = 0;
 volatile float rpsK = 0.0;
 
 // LED
 int LED_OUT_PIN = 15;
-
 
 // ARDUINO main functions
 
@@ -103,153 +96,167 @@ void setup() {
   formatEEPROM();
   readEEPROM();
 
-  startOn = true;
-
   // On start action.
   delay(1000);
+  tIdleStart = millis();
 }
-
 
 void loop() {  
   if (startOn) {    
+    setLED(false);
+    
     if (thrLow()) {
       enterNormal = true;  
     } else {
       switch(sw) {
          case modeNone : directOn = true; break;
          case mode3D : calibOn = true; break;                     
-         case mode2D : progOn = true; break;
+         case mode2D : paramSetOn = true; break;
       }
       
       buzz(3 - sw, 400, 400);
     }        
-  } else if (directOn) {
-    
+  } 
+  
+  if (directOn) {    
      // Exit.
-     if (thrLow() && switchChanged()) {
+     if (isEndOfProgramming()) {
          directOn = false;  
          enterNormal = true;
      }
   } else if (calibOn) { 
-      digitalWrite(ZUMM_OUT_PIN, (millis() % 3000 / 50));  
+    if (startOn) {
+      gMin = 1500;
+      gMax = 1500;
+      tMax = 1500;
+      tMin = 1500;
+      gOld = 1500;
+    }
+      setLED(millis() % 200 / 100);    
 
-      g1A = min(g1A, gIn);
-      g2A = max(g2A, gIn);
-      t1A = min(t1A, tIn);
-      t2A = max(t2A, tIn); 
+      gMin = min(gMin, gIn);
+      gMax = max(gMax, gIn);
+      tMax = min(tMax, tIn);
+      tMin = max(tMin, tIn); 
             
-       // Exit.
-       if ((tIn - t1A < 150) && switchChanged()) {
+      if (isEndOfProgramming()) {
            // Check if calibration is valid, and 
            // write data of calibration in EEPROM memory. 
-           if ((g2A - g1A) > 500 && (t2A - t1A) > 500) {
-              EEPROM.write(G1, (g1 = g1A) / 10);
-              EEPROM.write(G2, (g2 = g2A) / 10);              
-              EEPROM.write(T1, (t1 = t1A) / 10);
-              EEPROM.write(T2, (t2 = t2A) / 10);                       
-              buzz(1, 1000, 100);
+           if ((gMax - gMin) > 500 && (tMin - tMax) > 500) {
+              EEPROM.write(GMIN, gMin / 10);
+              EEPROM.write(GMAX, gMax / 10);              
+              EEPROM.write(TMIN, tMax / 10);
+              EEPROM.write(TMAX, tMin / 10);                       
+              buzz(1, 1000, 500);
            } else {
-              // Calibration failed. 
-              buzz (3, 300, 300);
+              // Read old values.
+              readEEPROM();
            }
          
            calibOn = false;  
            enterNormal = true;
        } 
-  } else if (progOn) {
-      if (startOn)   
-        oldCurChannel = curChannel;
+  } else if (paramSetOn) {
+      if (startOn) {  
+        EEPROM.write(0, 0);
+        curParamVal = curParam = 0;
+        dispValChange(false);             
+      }
         
-      double newChannelVal = ttIn * (NUM_PARAMS + 1);
-      double channelDelta = newChannelVal - curChannelVal;
+      double newParamVal = ttIn * (NUM_PARAMS + 1);
+      double paramDelta = newParamVal - curParamVal;
   
       // Add some hysteresis.
-      if (channelDelta > 0.2 || channelDelta < - 0.2) {
-        curChannelVal = newChannelVal;
-        curChannel = curChannelVal;
-        if (curChannel > NUM_PARAMS)
-          curChannel = NUM_PARAMS;
+      if (paramDelta > 0.2 || paramDelta < - 0.2) {
+        curParamVal = newParamVal;
+        curParam = curParamVal;
+        if (curParam > NUM_PARAMS)
+          curParam = NUM_PARAMS;
+          
+        // To suppress GAIN change sound.
+        dispValChange(false);                
       }
   
-      // Save new curChannel.
-      if (switchChanged()) {
-        if (sw == mode2D) {
-          EEPROM.write(0, curChannel);
-          buzz(5, 10, 30);        
-          writeParam();
-          dispValChange(false);
-        }
+      // Change of param.
+      if (curParam != oldCurParam) {
+        oldCurParam = curParam;
+        curParamChangeTime = millis();      
       }
   
-      // Change of channel.
-      if (curChannel != oldCurChannel) {
-        oldCurChannel = curChannel;
-        channelChangeTime = millis();
-        endProgTime = 0;
-      }
-  
-      // On channel change.
-      if (channelChangeTime && (millis() - channelChangeTime > 500) ) {
-        if (curChannel == 0) {
-          buzz(30, 1, 1);
-          endProgTime = millis();
-        } else {
-          buzz(curChannel, 200, 100);
-        }
-  
-        channelChangeTime = 0;
+      // On current param change.
+      if (curParamChangeTime && (millis() - curParamChangeTime > 500) ) {
+        soundCurParamChange(); 
+        curParamChangeTime = 0;
       }
   
       // Display parameter change.
       dispValChange(true);
   
+      // Save new curParam.
+      if (switchChanged() && sw == mode2D) {
+        buzz(2, 10, 30);           
+        writeParam();   
+        dispValChange(false);     
+        
+        boolean released = false;
+        boolean setAgain = false;
+        
+        // Detect second switch move in 1 sec.
+        for (int idx = 0; idx< 40; idx++) {
+          if (switchChanged()) {
+            if (sw != mode2D) {
+              released = true;
+            } else {
+              setAgain = true;         
+            }
+          }
+      
+          delay(25);             
+        }
+                
+        if (setAgain) {
+            EEPROM.write(0, curParam);
+            buzz(1, 500, 100);                         
+        } 
+      }
+  
       // On programming end;
-      if (endProgTime && ( millis() - endProgTime > 2000)) {
-        buzz(10, 10, 30);
-        curChannel = EEPROM.read(0);
-        readParams();
-        progOn = false ;
+      if (isEndOfProgramming()) {
+        paramSetOn = false ;
+        enterNormal = true;    
       }
     } else {   // Normal mode.
       if (enterNormal) {
-        buzz(5, 10, 30);          
-        buzz(curChannel, 200, 100);        
         enterNormal = false;
+        oldSw = sw;
+        curParam = EEPROM.read(0);
+        readParams();
+        
+        setLED(true);        
+        delay(200);        
+        buzz(6, 10, 30);          
+        delay(200);
+        soundCurParamChange();             
+        setLED(false);        
       }
 
       // Making 'low battery bips' by buzzler.
       digitalWrite(ZUMM_OUT_PIN, !lowBatt || (millis() % 5000 / 4500));
         
-      if (sw != oldSw) {
-         buzz(1, 50, 100);  
-      }
+      soundSwitchChange();      
+      // debug();
     }
     
+    // Loop end.
     oldSw = sw;
-    //  Serial.print(curChannel);
-    //  Serial.print(" ");
-    //  if (curChannel)
-    //    Serial.print(EEPROM.read(curChannel));
-    //  Serial.println("");
-    // Serial.println(param[THR_MIN_PARAM] / 5.0);
-    // Serial.println(ttIn);
-    // Serial.println(gIn);
-    // Serial.println(gOut);
-    // Serial.println(rpsK);
-    // Serial.println(gAOut);
-    // Serial.println("");
-    // printInt("MOD IN", modIn);
-    // printInt("switch mode", sw);
-    // printInt("THR IN", tIn);
-          
     startOn = false;
-    delay(100);    
+    noPPMBlinking();
+    delay(25);    
 }
 
+// VECTORS
 
-// INTERRUPT VECTORS
-
-// Optic Sensor interrupt
+// Optic Sensor interrupt processing.
 ISR(INT6_vect)
 {
   counter++;
@@ -284,26 +291,26 @@ ISR(INT0_vect)
     setTimer(tOut);
     sei();
 
-    ttIn = getValue(t1, t2, tIn);
+    ttIn = getValue(tMax, tMin, tIn);
 
-    if (progOn || calibOn) {
-      tOut = t1;
+    if (paramSetOn || calibOn) {
+      tOut = tMax;
     } else if (directOn) {
-      tOutA = tIn;
+      tOut = tIn;
     } else if (sw == mode2D) {
-      tOutA = ttIn + (ttIn - rpsK) * 5.0 * param[THR_PARAM];
+      tOutA = ttIn + (ttIn - rpsK) * 5.0 * param[THR_SUP_PARAM];
 
-      tMin = param[THR_MIN_PARAM] / 5.0;
+      float ttMin = param[THR_MIN_PARAM] / 5.0;
 
       // In stabilizin set minimum gain as tMin.
-      if ((ttIn > tMin) && (tOutA < tMin)) {
-        tOutA = tMin;
+      if ((ttIn > ttMin) && (tOutA < ttMin)) {
+        tOutA = ttMin;
       }      
+  
+      tOut  = setValue(tMax, tMin, tOutA);      
     } else {
-      tOutA = ttIn;
+      tOut = tIn;
     }
-    
-    tOut  = setValue(t1, t2, tOutA);
   } 
 }
 
@@ -311,36 +318,36 @@ ISR(INT0_vect)
 ISR(INT1_vect)
 {
   if (digitalRead(GAIN_IN_PIN) == LOW) {
-    gIn = micros() - modStart + 20;
+    gIn = micros() - mStart + 20;
   } else {
-    modStart = micros();
+    mStart = micros();
 
     rps = rps + 5 * counter ;
     rps = rps * 5 / 6;
     counter = 0;
     sei();
 
-    rpsK = (0.2 + 0.8 * param[PROP_PARAM]) * rps / 300;
+    rpsK = param[PROP_PARAM] * rps / 300.0;
 
-    if (progOn || calibOn) {
+    if (paramSetOn || calibOn) {
        gAOut = 0;
     } else if (directOn) {
        gAOut = gIn;
     } else {
-       gAOut = param[GAIN_MAX_PARAM] / (1.0 + rpsK * param[GAIN_PARAM] * 5.0);
+       gAOut = param[GAIN_MAX_PARAM] / (1.0 + rpsK * param[GAIN_SUP_PARAM] * 5.0);
     }
 
-    gOut = setValue(g1, g2, gAOut);
+    gOut = setValue(gMin, gMax, gAOut);
 
     // Parameter adjustment.
-    if (curChannel > 0) {
-      param[curChannel] = getValue(g1, g2, gIn);
+    if (curParam > 0) {
+      param[curParam] = getValue(gMin, gMax, gIn);
     }
 
     // Battery check.
     zIn = analogRead(BATT_IN) / 1024.0;
     
-    lowBatt =  (zIn > 0.1) && (zIn *  4.0 + tOutA * 0.35 < 2.0 + param[ZUMM_PARAM] ) && (param[ZUMM_PARAM] > 0.1) ;
+    lowBatt =  (zIn > 0.1) && (zIn *  4.0 + tOutA * 0.35 < 2.0 + param[LOW_BATT_PARAM] ) && (param[LOW_BATT_PARAM] > 0.1) ;
   } 
 }
 
@@ -348,9 +355,9 @@ ISR(INT1_vect)
 ISR(INT2_vect)
 {
   if (digitalRead(MOD_IN_PIN) == HIGH) {
-    sStart = micros();
+    gStart = micros();
   } else {
-    modIn = micros() - sStart + 20;
+    modIn = micros() - gStart + 20;
     sei();
     
     sw = (modIn < sw1Level) ? 0 :
@@ -368,18 +375,18 @@ void readParams()
   }
 }
 
-// Stores current channel param in EEPROM.
+// Stores current param param in EEPROM.
 void writeParam()
 {
-  if (curChannel > 0) {
-    int paramInt = param[curChannel] * 256.0;
+  if (curParam > 0) {
+    int paramInt = param[curParam] * 256.0;
 
     if (paramInt < 0)
       paramInt = 0;
     else if (paramInt > 255)
       paramInt = 255;
 
-      EEPROM.write(curChannel, paramInt);
+      EEPROM.write(curParam, paramInt);
   }
 }
 
@@ -433,19 +440,18 @@ void buzz(int num, int millsOn, int millsOff)
   }
 }
 
-
 // Switches on LED and do buzz when 
-// current GAIN defined parameter crosses 
+// current 'variable' parameter crosses 
 // stored parameter value. 
 void dispValChange(boolean doSound)
 {
-    if (curChannel == 0)
+    if (curParam == 0)
       return;
 
-    int vOld = EEPROM.read(curChannel);
-    int v = param[curChannel] * 256.0;
+    int vOld = EEPROM.read(curParam);
+    int v = param[curParam] * 256.0;
 
-    digitalWrite(LED_OUT_PIN, v < vOld);
+    setLED(v > vOld);
     
     if (isLess) {
         if (v < vOld - 1) {
@@ -466,12 +472,16 @@ void dispValChange(boolean doSound)
 
 // Detects if the switch is changed
 boolean switchChanged() {
-  return oldSw != sw;
+  boolean state = oldSw != sw;
+  
+  oldSw = sw;
+  
+  return state;  
 }
 
 // Detects if throttle is low.
 boolean thrLow() {
-  return tIn - t1 < 150;
+  return tIn - tMax < 150;
 }
 
 // Prints int value into serial.
@@ -507,19 +517,19 @@ void systemInit()
 // First time formatting.
 void formatEEPROM()
 {
-   if (EEPROM.read(G1) != 0) 
+   if (EEPROM.read(GMIN) != 0) 
       return;
   
-   EEPROM.write(G1, 1096 / 10);
-   EEPROM.write(G2, 1964 / 10);
-   EEPROM.write(T1, 1030 / 10);
-   EEPROM.write(T2, 1892 / 10);
+   EEPROM.write(GMIN, 1096 / 10);
+   EEPROM.write(GMAX, 1964 / 10);
+   EEPROM.write(TMIN, 1030 / 10);
+   EEPROM.write(TMAX, 1892 / 10);
   
-   EEPROM.write(GAIN_PARAM, 0.32 * 255);
+   EEPROM.write(GAIN_SUP_PARAM, 0.32 * 255);
    EEPROM.write(GAIN_MAX_PARAM, 1.0 * 255);
-   EEPROM.write(ZUMM_PARAM, 0.85 * 255);     
+   EEPROM.write(LOW_BATT_PARAM, 0.85 * 255);     
    EEPROM.write(PROP_PARAM, 0.73 * 255);
-   EEPROM.write(THR_PARAM, 0.39 * 255);
+   EEPROM.write(THR_SUP_PARAM, 0.39 * 255);
    EEPROM.write(THR_MIN_PARAM, 0.34 * 255);         
    
    buzz(1, 3000, 0);
@@ -528,13 +538,68 @@ void formatEEPROM()
 // Reads EEPROM into memory.
 void readEEPROM()
 {
-  g1 = EEPROM.read(G1) * 10;
-  g2 = EEPROM.read(G2) * 10;  
-  t1 = EEPROM.read(T1) * 10;
-  t2 = EEPROM.read(T2) * 10;    
+  gMin = EEPROM.read(GMIN) * 10;
+  gMax = EEPROM.read(GMAX) * 10;  
+  tMax = EEPROM.read(TMIN) * 10;
+  tMin = EEPROM.read(TMAX) * 10;    
 
-  curChannelVal = curChannel = EEPROM.read(0);
+  curParamVal = curParam = EEPROM.read(0);
   
   readParams();
 }
 
+// Gives sound signals on change of the 3-pos switch
+// position.
+void  soundSwitchChange()
+{
+  if (sw != oldSw) {
+         buzz(3 - sw, 5, 20);  
+  }
+}
+
+// This function blinks LED is one of PPM is missed.
+void noPPMBlinking()
+{
+    long curTime = micros();
+
+    if (curTime - gStart > 1000000 ||
+        curTime - tStart > 1000000 || 
+        curTime - mStart > 1000000) {
+        setLED(millis() % 1000 / 500);    
+    }
+}
+
+// Here functions for printing parameters into serial port are placed.
+void debug()
+{
+    printInt("MOD IN", modIn);
+    printInt("switch mode", sw);
+    printInt("THR IN", tIn);
+    printInt("GAIN IN", gIn);
+}
+
+void soundCurParamChange()
+{
+    if (curParam != 0) {
+      buzz(curParam, 200, 100);
+    }
+}
+
+void setLED(boolean isOn)
+{
+  digitalWrite(LED_OUT_PIN, isOn ? 0 : 1);    
+}
+
+// Test if throttle is of and GAIN knob doesn't moved 
+// during 5 seconds. 
+boolean isEndOfProgramming() 
+{
+     // Find time when stick aren't moving and 
+     // throttle is down. 
+     if ((tIn - tMax > 50) || (gIn - gOld) > 50 ) {
+          gOld = gIn;
+          tIdleStart = millis();            
+     }
+     
+     return millis() - tIdleStart > 5000;
+}  
